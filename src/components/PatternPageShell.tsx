@@ -344,8 +344,10 @@ function getTradingTip(name: string, type: string, price: number): string | null
 
 function formatFormedTime(ts: number, timeframe: string): string {
   const d = new Date(ts);
+  const date = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   if (timeframe === 'D' || timeframe === 'W') {
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    return date;
   }
-  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+  const time = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+  return `${date} ${time}`;
 }
