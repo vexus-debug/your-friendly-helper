@@ -66,7 +66,7 @@ export function detectCandlestickPatterns(candles: Candle[], excludeLastCandle =
 
     // Hammer (bullish reversal at bottom)
     if (lowerWick(c) > body * 2 && upperWick(c) < body * 0.5 && isBearish(prev)) {
-      patterns.push({ name: 'Hammer', type: 'bullish', significance: 'high', candleIndex: i, description: 'Bullish reversal — long lower wick' });
+      patterns.push({ name: 'Hammer', type: 'bullish', significance: 'high', candleIndex: i, description: 'Bullish reversal — long lower wick shows buyers stepping in. Enter long on next candle close above hammer high. Stop below hammer low. Target: 1:2 RR or next resistance.' });
     }
 
     // Inverted Hammer
