@@ -34,6 +34,8 @@ export interface TrendDuration {
   exhaustionRisk: 'low' | 'medium' | 'high';
   exhaustionSignals: string[];
   atrStop: number; // ATR-based trailing stop
+  invalidationLevel: number; // most recent HL (uptrend) or LH (downtrend)
+  invalidationDescription: string;
 }
 
 export interface ConfirmedTrend extends TrendSignal {
@@ -104,49 +106,68 @@ function calculateTrendDuration(
   // ATR-based trailing stop (2x ATR from current price)
   const atrStop = isBull ? price - 2 * atr : price + 2 * atr;
 
+  // ─── Find invalidation level: most recent HL (uptrend) or LH (downtrend) ───
+  let invalidationLevel = startPrice;
+  let invalidationDescription = '';
+
+  const trendCandles = candles.slice(Math.max(0, trendStartIdx - 2));
+  const swingHighs: { price: number; idx: number }[] = [];
+  const swingLows: { price: number; idx: number }[] = [];
+
+  for (let i = 2; i < trendCandles.length - 2; i++) {
+    const c = trendCandles[i];
+    if (c.high > trendCandles[i-1].high && c.high > trendCandles[i-2].high &&
+        c.high > trendCandles[i+1].high && c.high > trendCandles[i+2].high) {
+      swingHighs.push({ price: c.high, idx: i });
+    }
+    if (c.low < trendCandles[i-1].low && c.low < trendCandles[i-2].low &&
+        c.low < trendCandles[i+1].low && c.low < trendCandles[i+2].low) {
+      swingLows.push({ price: c.low, idx: i });
+    }
+  }
+
+  if (isBull) {
+    if (swingLows.length >= 1) {
+      const recentHL = swingLows[swingLows.length - 1];
+      invalidationLevel = recentHL.price;
+      invalidationDescription = swingLows.length >= 2 && recentHL.price > swingLows[swingLows.length - 2].price
+        ? 'Most recent Higher Low — break below invalidates uptrend'
+        : 'Most recent swing low — break below signals reversal';
+    } else {
+      invalidationDescription = 'Trend start price — no swing low formed yet';
+    }
+  } else {
+    if (swingHighs.length >= 1) {
+      const recentLH = swingHighs[swingHighs.length - 1];
+      invalidationLevel = recentLH.price;
+      invalidationDescription = swingHighs.length >= 2 && recentLH.price < swingHighs[swingHighs.length - 2].price
+        ? 'Most recent Lower High — break above invalidates downtrend'
+        : 'Most recent swing high — break above signals reversal';
+    } else {
+      invalidationDescription = 'Trend start price — no swing high formed yet';
+    }
+  }
+
   // Exhaustion analysis
   const exhaustionSignals: string[] = [];
-
-  // RSI extremes
   if (isBull && rsi > 75) exhaustionSignals.push(`RSI overbought (${rsi.toFixed(0)})`);
   if (!isBull && rsi < 25) exhaustionSignals.push(`RSI oversold (${rsi.toFixed(0)})`);
-
-  // MACD histogram declining
   if (isBull && macdHist < 0) exhaustionSignals.push('MACD histogram negative');
   if (!isBull && macdHist > 0) exhaustionSignals.push('MACD histogram positive');
-
-  // Extended duration (trend might be overextended)
   if (bars > 50) exhaustionSignals.push(`Extended duration (${bars} bars)`);
-
-  // ADX declining (trend weakening)
   if (adx < 20) exhaustionSignals.push(`ADX weak (${adx.toFixed(0)})`);
-
-  // Volume drying up
   if (volumeRatio < 0.7) exhaustionSignals.push(`Low volume (${volumeRatio.toFixed(1)}x)`);
-
-  // Price extended from EMA (mean reversion likely)
   const pctFromStart = Math.abs(trendMove);
   if (pctFromStart > 20) exhaustionSignals.push(`Large move (${pctFromStart.toFixed(1)}%)`);
 
-  // Determine risk level
   let exhaustionRisk: 'low' | 'medium' | 'high' = 'low';
   if (exhaustionSignals.length >= 3) exhaustionRisk = 'high';
   else if (exhaustionSignals.length >= 1) exhaustionRisk = 'medium';
 
   return {
-    bars,
-    startPrice,
-    startTime,
-    currentPrice: price,
-    trendMove,
-    fibRetrace382,
-    fibRetrace500,
-    fibRetrace618,
-    fibExtend1272,
-    fibExtend1618,
-    exhaustionRisk,
-    exhaustionSignals,
-    atrStop,
+    bars, startPrice, startTime, currentPrice: price, trendMove,
+    fibRetrace382, fibRetrace500, fibRetrace618, fibExtend1272, fibExtend1618,
+    exhaustionRisk, exhaustionSignals, atrStop, invalidationLevel, invalidationDescription,
   };
 }
 

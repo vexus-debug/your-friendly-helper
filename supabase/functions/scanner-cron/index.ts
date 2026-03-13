@@ -375,7 +375,6 @@ function calculateTrendDuration(
   const price = candles[candles.length - 1].close;
   const isBull = direction === "bull";
 
-  // Walk backwards to find where EMA9 crossed EMA21
   let trendStartIdx = candles.length - 1;
   for (let i = candles.length - 2; i >= 0; i--) {
     if (i >= ema9.length || i >= ema21.length) break;
@@ -389,7 +388,6 @@ function calculateTrendDuration(
   const startTime = candles[trendStartIdx]?.time ?? 0;
   const trendMove = ((price - startPrice) / startPrice) * 100;
 
-  // Find extreme for Fibonacci
   let extreme = startPrice;
   for (let i = trendStartIdx; i < candles.length; i++) {
     if (isBull) { if (candles[i].high > extreme) extreme = candles[i].high; }
@@ -404,7 +402,30 @@ function calculateTrendDuration(
   const fibExtend1618 = startPrice + moveRange * 1.618;
   const atrStop = isBull ? price - 2 * atr : price + 2 * atr;
 
-  // Exhaustion analysis
+  // Find invalidation level
+  let invalidationLevel = startPrice;
+  let invalidationDescription = "";
+  const trendCandles = candles.slice(Math.max(0, trendStartIdx - 2));
+  const sHighs: { price: number }[] = [], sLows: { price: number }[] = [];
+  for (let i = 2; i < trendCandles.length - 2; i++) {
+    const c = trendCandles[i];
+    if (c.high > trendCandles[i-1].high && c.high > trendCandles[i-2].high && c.high > trendCandles[i+1].high && c.high > trendCandles[i+2].high) sHighs.push({ price: c.high });
+    if (c.low < trendCandles[i-1].low && c.low < trendCandles[i-2].low && c.low < trendCandles[i+1].low && c.low < trendCandles[i+2].low) sLows.push({ price: c.low });
+  }
+  if (isBull) {
+    if (sLows.length >= 1) {
+      invalidationLevel = sLows[sLows.length - 1].price;
+      invalidationDescription = sLows.length >= 2 && sLows[sLows.length - 1].price > sLows[sLows.length - 2].price
+        ? "Most recent Higher Low — break below invalidates uptrend" : "Most recent swing low — break below signals reversal";
+    } else { invalidationDescription = "Trend start price — no swing low formed yet"; }
+  } else {
+    if (sHighs.length >= 1) {
+      invalidationLevel = sHighs[sHighs.length - 1].price;
+      invalidationDescription = sHighs.length >= 2 && sHighs[sHighs.length - 1].price < sHighs[sHighs.length - 2].price
+        ? "Most recent Lower High — break above invalidates downtrend" : "Most recent swing high — break above signals reversal";
+    } else { invalidationDescription = "Trend start price — no swing high formed yet"; }
+  }
+
   const exhaustionSignals: string[] = [];
   if (isBull && rsi > 75) exhaustionSignals.push(`RSI overbought (${rsi.toFixed(0)})`);
   if (!isBull && rsi < 25) exhaustionSignals.push(`RSI oversold (${rsi.toFixed(0)})`);
@@ -420,10 +441,27 @@ function calculateTrendDuration(
   if (exhaustionSignals.length >= 3) exhaustionRisk = "high";
   else if (exhaustionSignals.length >= 1) exhaustionRisk = "medium";
 
-  return { bars, startPrice, startTime, currentPrice: price, trendMove, fibRetrace382, fibRetrace500, fibRetrace618, fibExtend1272, fibExtend1618, exhaustionRisk, exhaustionSignals, atrStop };
+  return { bars, startPrice, startTime, currentPrice: price, trendMove, fibRetrace382, fibRetrace500, fibRetrace618, fibExtend1272, fibExtend1618, exhaustionRisk, exhaustionSignals, atrStop, invalidationLevel, invalidationDescription };
 }
 
-// ─── Trend Analysis (matches client-side analyzeTrend) ──────────────
+// ─── Support & Resistance ───────────────────────────────────────────
+function findSupportResistance(candles: Candle[], emas: { e9: number; e21: number; e50: number; e200: number }) {
+  const price = candles[candles.length - 1].close;
+  const lookback = Math.min(candles.length, 100), recent = candles.slice(-lookback);
+  const levels: number[] = [];
+  for (let i = 2; i < recent.length - 2; i++) {
+    if (recent[i].high > recent[i-1].high && recent[i].high > recent[i-2].high && recent[i].high > recent[i+1].high && recent[i].high > recent[i+2].high) levels.push(recent[i].high);
+    if (recent[i].low < recent[i-1].low && recent[i].low < recent[i-2].low && recent[i].low < recent[i+1].low && recent[i].low < recent[i+2].low) levels.push(recent[i].low);
+  }
+  levels.push(emas.e9, emas.e21, emas.e50, emas.e200);
+  const supports = levels.filter(l => l < price).sort((a, b) => b - a);
+  const resistances = levels.filter(l => l > price).sort((a, b) => a - b);
+  return {
+    nearestSupport: supports[0] ?? price * 0.95, nearestResistance: resistances[0] ?? price * 1.05,
+    supportDistance: ((price - (supports[0] ?? price * 0.95)) / price) * 100,
+    resistanceDistance: (((resistances[0] ?? price * 1.05) - price) / price) * 100,
+  };
+}
 function analyzePriceStructure(candles: Candle[], lookback = 30): "bull" | "bear" | "neutral" {
   const r = candles.slice(-lookback);
   if (r.length < 8) return "neutral";
@@ -480,58 +518,79 @@ function analyzeTrend(candles: Candle[], emaPeriods = { fast: 9, slow: 21, mid: 
   const volSpike = detectVolumeSpikes(candles), volClusters = detectVolumeClusters(candles);
   const consistency50 = calcTrendConsistency(candles, 50, 20), consistency200 = calcTrendConsistency(candles, 200, 30);
 
-  // Weighted voting (simplified - same logic as client)
+  // Weighted voting with indicators array (matches client-side)
+  const indicators: any[] = [];
   let bull = 0, bear = 0, tw = 0;
-  let totalIndicators = 0, confirmedBull = 0, confirmedBear = 0;
-  const vote = (w: number, sig: "bull" | "bear" | "neutral") => {
-    tw += w; totalIndicators++;
-    if (sig === "bull") { bull += w; confirmedBull++; }
-    else if (sig === "bear") { bear += w; confirmedBear++; }
+
+  const vote = (w: number, sig: "bull" | "bear" | "neutral", name: string, value: string) => {
+    tw += w;
+    const confirmed = sig !== "neutral";
+    if (sig === "bull") bull += w;
+    else if (sig === "bear") bear += w;
+    indicators.push({ name, signal: sig, value, confirmed, weight: w });
+  };
+  const skip = (w: number, name: string, value: string) => {
+    tw += w;
+    indicators.push({ name, signal: "neutral", value, confirmed: false, weight: w });
   };
 
   // EMA Ribbon
   const emaAligned = e9 > e21 && e21 > e50 && e50 > e200;
   const emaBear = e9 < e21 && e21 < e50 && e50 < e200;
-  if (emaAligned) vote(2, "bull"); else if (emaBear) vote(2, "bear"); else { tw += 2; if (e9 > e21 && price > e50) bull += 0.8; else if (e9 < e21 && price < e50) bear += 0.8; }
+  if (emaAligned) vote(2, "bull", "EMA Ribbon", "Fully aligned ↑");
+  else if (emaBear) vote(2, "bear", "EMA Ribbon", "Fully aligned ↓");
+  else if (e9 > e21 && price > e50) { tw += 2; bull += 0.8; indicators.push({ name: "EMA Ribbon", signal: "bull", value: "Partial ↑", confirmed: false, weight: 2 }); }
+  else if (e9 < e21 && price < e50) { tw += 2; bear += 0.8; indicators.push({ name: "EMA Ribbon", signal: "bear", value: "Partial ↓", confirmed: false, weight: 2 }); }
+  else skip(2, "EMA Ribbon", "Mixed");
 
   // ADX
-  if (adx >= adxThreshold) vote(1.8, plusDI > minusDI ? "bull" : "bear"); else tw += 1.8;
+  if (adx >= adxThreshold) vote(1.8, plusDI > minusDI ? "bull" : "bear", "ADX/DI", `ADX ${adx.toFixed(0)} ${plusDI > minusDI ? "+DI>-DI" : "-DI>+DI"}`);
+  else skip(1.8, "ADX/DI", `ADX ${adx.toFixed(0)} (weak)`);
 
   // Ichimoku
   const iFB = ichimoku.priceVsCloud === "above" && ichimoku.cloudDirection === "bull" && ichimoku.tenkan > ichimoku.kijun && ichimoku.chikouVsPrice > 0;
   const iFBr = ichimoku.priceVsCloud === "below" && ichimoku.cloudDirection === "bear" && ichimoku.tenkan < ichimoku.kijun && ichimoku.chikouVsPrice < 0;
-  if (iFB) vote(2, "bull"); else if (iFBr) vote(2, "bear"); else { tw += 2; if (ichimoku.priceVsCloud === "above") bull += 0.8; else if (ichimoku.priceVsCloud === "below") bear += 0.8; }
+  if (iFB) vote(2, "bull", "Ichimoku", "All 5 lines bullish");
+  else if (iFBr) vote(2, "bear", "Ichimoku", "All 5 lines bearish");
+  else if (ichimoku.priceVsCloud === "above") { tw += 2; bull += 0.8; indicators.push({ name: "Ichimoku", signal: "bull", value: `Above cloud (${ichimoku.cloudDirection})`, confirmed: false, weight: 2 }); }
+  else if (ichimoku.priceVsCloud === "below") { tw += 2; bear += 0.8; indicators.push({ name: "Ichimoku", signal: "bear", value: `Below cloud (${ichimoku.cloudDirection})`, confirmed: false, weight: 2 }); }
+  else skip(2, "Ichimoku", "Inside cloud");
 
-  vote(1.2, psar.direction);
-  vote(1.5, supertrend.direction);
-  if (price > vwap * 1.002) vote(1, "bull"); else if (price < vwap * 0.998) vote(1, "bear"); else tw += 1;
-  if (linReg.rSquared > 0.6) vote(1.3, linReg.slope > 0 ? "bull" : "bear"); else tw += 1.3;
-  if (price > demaVal && demaVal > e50) vote(0.8, "bull"); else if (price < demaVal && demaVal < e50) vote(0.8, "bear"); else tw += 0.8;
-  vote(1.5, price > e200 ? "bull" : "bear");
-  if (priceStructure !== "neutral") vote(1.8, priceStructure); else tw += 1.8;
+  vote(1.2, psar.direction, "Parabolic SAR", psar.direction === "bull" ? "SAR below price" : "SAR above price");
+  vote(1.5, supertrend.direction, "Supertrend", `${supertrend.direction === "bull" ? "Uptrend" : "Downtrend"} ${supertrend.value.toPrecision(5)}`);
+  if (price > vwap * 1.002) vote(1, "bull", "VWAP", "Price above VWAP"); else if (price < vwap * 0.998) vote(1, "bear", "VWAP", "Price below VWAP"); else skip(1, "VWAP", "At VWAP");
+  if (linReg.rSquared > 0.6) vote(1.3, linReg.slope > 0 ? "bull" : "bear", "Lin Regression", `R²=${linReg.rSquared.toFixed(2)} slope ${linReg.slope > 0 ? "↑" : "↓"}`); else skip(1.3, "Lin Regression", `R²=${linReg.rSquared.toFixed(2)} (weak fit)`);
+  if (price > demaVal && demaVal > e50) vote(0.8, "bull", "DEMA", "Price > DEMA > EMA50"); else if (price < demaVal && demaVal < e50) vote(0.8, "bear", "DEMA", "Price < DEMA < EMA50"); else skip(0.8, "DEMA", "Mixed DEMA signals");
+  const pctFrom200 = ((price - e200) / e200) * 100;
+  vote(1.5, price > e200 ? "bull" : "bear", "200 EMA", `${pctFrom200 >= 0 ? "+" : ""}${pctFrom200.toFixed(1)}% ${price > e200 ? "above" : "below"}`);
+  if (priceStructure !== "neutral") vote(1.8, priceStructure, "Structure", priceStructure === "bull" ? "HH + HL pattern" : "LH + LL pattern"); else skip(1.8, "Structure", "No clear pattern");
 
   // Momentum
-  if (rsi > 55 && rsi < 75) vote(1.2, "bull"); else if (rsi < 45 && rsi > 25) vote(1.2, "bear"); else tw += 1.2;
-  if (macd.histogram > 0 && macd.macd > 0) vote(1.3, "bull"); else if (macd.histogram < 0 && macd.macd < 0) vote(1.3, "bear"); else tw += 1.3;
-  if (stoch.k > 50 && stoch.k < 80 && stoch.k > stoch.d) vote(0.8, "bull"); else if (stoch.k < 50 && stoch.k > 20 && stoch.k < stoch.d) vote(0.8, "bear"); else tw += 0.8;
-  if (stochRsi.k > 50 && stochRsi.k < 85) vote(0.7, "bull"); else if (stochRsi.k < 50 && stochRsi.k > 15) vote(0.7, "bear"); else tw += 0.7;
-  if (williamsR > -50 && williamsR > -20) vote(0.6, "bull"); else if (williamsR < -50 && williamsR < -80) vote(0.6, "bear"); else tw += 0.6;
-  if (cci > 50 && cci < 200) vote(0.8, "bull"); else if (cci < -50 && cci > -200) vote(0.8, "bear"); else tw += 0.8;
-  if (roc > 1) vote(0.7, "bull"); else if (roc < -1) vote(0.7, "bear"); else tw += 0.7;
-  if (mfi > 55 && mfi < 80) vote(1, "bull"); else if (mfi < 45 && mfi > 20) vote(1, "bear"); else tw += 1;
-  if (cmf > 0.05) vote(1, "bull"); else if (cmf < -0.05) vote(1, "bear"); else tw += 1;
-  if (tsi > 5) vote(0.9, "bull"); else if (tsi < -5) vote(0.9, "bear"); else tw += 0.9;
+  if (rsi > 55 && rsi < 75) vote(1.2, "bull", "RSI", `${rsi.toFixed(0)} bullish`); else if (rsi < 45 && rsi > 25) vote(1.2, "bear", "RSI", `${rsi.toFixed(0)} bearish`); else skip(1.2, "RSI", `${rsi.toFixed(0)}`);
+  if (macd.histogram > 0 && macd.macd > 0) vote(1.3, "bull", "MACD", `Hist +${macd.histogram.toPrecision(3)}`); else if (macd.histogram < 0 && macd.macd < 0) vote(1.3, "bear", "MACD", `Hist ${macd.histogram.toPrecision(3)}`); else skip(1.3, "MACD", "Diverging");
+  if (stoch.k > 50 && stoch.k < 80 && stoch.k > stoch.d) vote(0.8, "bull", "Stochastic", `%K=${stoch.k.toFixed(0)} > %D`); else if (stoch.k < 50 && stoch.k > 20 && stoch.k < stoch.d) vote(0.8, "bear", "Stochastic", `%K=${stoch.k.toFixed(0)} < %D`); else skip(0.8, "Stochastic", `%K=${stoch.k.toFixed(0)}`);
+  if (stochRsi.k > 50 && stochRsi.k < 85) vote(0.7, "bull", "StochRSI", `K=${stochRsi.k.toFixed(0)}`); else if (stochRsi.k < 50 && stochRsi.k > 15) vote(0.7, "bear", "StochRSI", `K=${stochRsi.k.toFixed(0)}`); else skip(0.7, "StochRSI", `K=${stochRsi.k.toFixed(0)} (extreme)`);
+  if (williamsR > -50 && williamsR > -20) vote(0.6, "bull", "Williams %R", `${williamsR.toFixed(0)}`); else if (williamsR < -50 && williamsR < -80) vote(0.6, "bear", "Williams %R", `${williamsR.toFixed(0)}`); else skip(0.6, "Williams %R", `${williamsR.toFixed(0)}`);
+  if (cci > 50 && cci < 200) vote(0.8, "bull", "CCI", `${cci.toFixed(0)} bullish`); else if (cci < -50 && cci > -200) vote(0.8, "bear", "CCI", `${cci.toFixed(0)} bearish`); else skip(0.8, "CCI", `${cci.toFixed(0)}`);
+  if (roc > 1) vote(0.7, "bull", "ROC", `+${roc.toFixed(1)}%`); else if (roc < -1) vote(0.7, "bear", "ROC", `${roc.toFixed(1)}%`); else skip(0.7, "ROC", `${roc.toFixed(1)}%`);
+  if (mfi > 55 && mfi < 80) vote(1, "bull", "MFI", `${mfi.toFixed(0)} inflow`); else if (mfi < 45 && mfi > 20) vote(1, "bear", "MFI", `${mfi.toFixed(0)} outflow`); else skip(1, "MFI", `${mfi.toFixed(0)}`);
+  if (cmf > 0.05) vote(1, "bull", "CMF", `${cmf.toFixed(3)} accumulation`); else if (cmf < -0.05) vote(1, "bear", "CMF", `${cmf.toFixed(3)} distribution`); else skip(1, "CMF", `${cmf.toFixed(3)}`);
+  if (tsi > 5) vote(0.9, "bull", "TSI", `${tsi.toFixed(1)} positive`); else if (tsi < -5) vote(0.9, "bear", "TSI", `${tsi.toFixed(1)} negative`); else skip(0.9, "TSI", `${tsi.toFixed(1)}`);
 
   // Volatility
-  if (bb.percentB > 0.6 && bb.percentB < 0.95) vote(0.8, "bull"); else if (bb.percentB < 0.4 && bb.percentB > 0.05) vote(0.8, "bear"); else tw += 0.8;
-  if (donchian.breakoutUp) vote(1.2, "bull"); else if (donchian.breakoutDown) vote(1.2, "bear"); else { tw += 1.2; if (price > donchian.middle) bull += 0.36; else if (price < donchian.middle) bear += 0.36; }
+  if (bb.percentB > 0.6 && bb.percentB < 0.95) vote(0.8, "bull", "Bollinger", `%B=${(bb.percentB*100).toFixed(0)} upper half`); else if (bb.percentB < 0.4 && bb.percentB > 0.05) vote(0.8, "bear", "Bollinger", `%B=${(bb.percentB*100).toFixed(0)} lower half`); else skip(0.8, "Bollinger", `%B=${(bb.percentB*100).toFixed(0)}`);
+  if (donchian.breakoutUp) vote(1.2, "bull", "Donchian", "Breakout above"); else if (donchian.breakoutDown) vote(1.2, "bear", "Donchian", "Breakout below");
+  else if (price > donchian.middle) { tw += 1.2; bull += 0.36; indicators.push({ name: "Donchian", signal: "bull", value: "Upper half", confirmed: false, weight: 1.2 }); }
+  else if (price < donchian.middle) { tw += 1.2; bear += 0.36; indicators.push({ name: "Donchian", signal: "bear", value: "Lower half", confirmed: false, weight: 1.2 }); }
+  else skip(1.2, "Donchian", "Middle");
+  if (isSqueeze) indicators.push({ name: "Squeeze", signal: "neutral", value: "BB inside KC — breakout imminent", confirmed: false, weight: 0 });
 
   // Volume
-  if (volumeRatio > 1.3) { const d = bull > bear ? "bull" : bear > bull ? "bear" : null; if (d === "bull") vote(1, "bull"); else if (d === "bear") vote(1, "bear"); else tw += 1; } else tw += 1;
-  if (obv.trend !== "neutral") vote(1, obv.trend); else tw += 1;
-  if (ad.trend !== "neutral") vote(0.8, ad.trend); else tw += 0.8;
-  if (vpt.trend !== "neutral") vote(0.7, vpt.trend); else tw += 0.7;
-  if (volClusters.highVolumeZone === "support") vote(0.6, "bull"); else if (volClusters.highVolumeZone === "resistance") vote(0.6, "bear"); else tw += 0.6;
+  if (volumeRatio > 1.3) { const d = bull > bear ? "bull" : bear > bull ? "bear" : "neutral"; if (d !== "neutral") vote(1, d as any, "Volume", `${volumeRatio.toFixed(1)}x avg`); else skip(1, "Volume", `${volumeRatio.toFixed(1)}x avg`); } else skip(1, "Volume", `${volumeRatio.toFixed(1)}x avg (low)`);
+  if (obv.trend !== "neutral") vote(1, obv.trend, "OBV", obv.trend === "bull" ? "Rising" : "Falling"); else skip(1, "OBV", "Flat");
+  if (ad.trend !== "neutral") vote(0.8, ad.trend, "A/D Line", ad.trend === "bull" ? "Accumulation" : "Distribution"); else skip(0.8, "A/D Line", "Flat");
+  if (vpt.trend !== "neutral") vote(0.7, vpt.trend, "VPT", vpt.trend === "bull" ? "Rising" : "Falling"); else skip(0.7, "VPT", "Flat");
+  if (volClusters.highVolumeZone === "support") vote(0.6, "bull", "Vol Clusters", "Support at VPOC"); else if (volClusters.highVolumeZone === "resistance") vote(0.6, "bear", "Vol Clusters", "Resistance at VPOC"); else skip(0.6, "Vol Clusters", volClusters.highVolumeZone === "fair_value" ? "At fair value" : "No cluster");
 
   const maxS = Math.max(bull, bear), sr = tw > 0 ? maxS / tw : 0;
   const isEst = consistency50 > 0.65 || consistency200 > 0.7;
@@ -547,13 +606,14 @@ function analyzeTrend(candles: Candle[], emaPeriods = { fast: 9, slow: 21, mid: 
   probability -= (Math.min(bull, bear) / tw) * 10;
   probability = Math.max(15, Math.min(95, Math.round(probability)));
 
-  const confirmations = direction === "bull" ? confirmedBull : confirmedBear;
-  const totalChecks = totalIndicators + (totalIndicators - confirmedBull - confirmedBear);
+  const confirmations = indicators.filter(i => i.confirmed && i.signal === direction).length;
+  const totalChecks = indicators.length;
 
   const atr = calculateATR(candles);
   const trendDuration = calculateTrendDuration(candles, direction, ema9, ema21, rsi, macd.histogram, adx, volumeRatio, atr);
+  const supportResistance = findSupportResistance(candles, { e9, e21, e50, e200 });
 
-  return { direction, strength, ema9: e9, ema21: e21, ema50: e50, ema200: e200, adx, volumeRatio, score, rsi, macdHistogram: macd.histogram, priceStructure, plusDI, minusDI, probability, confirmations, totalChecks, trendDuration };
+  return { direction, strength, ema9: e9, ema21: e21, ema50: e50, ema200: e200, adx, volumeRatio, score, rsi, macdHistogram: macd.histogram, priceStructure, plusDI, minusDI, probability, confirmations, totalChecks, indicators, trendDuration, supportResistance };
 }
 
 // ─── Pattern Detection ──────────────────────────────────────────────

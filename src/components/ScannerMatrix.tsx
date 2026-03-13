@@ -533,6 +533,32 @@ function TrendCard({
                   </div>
                 </div>
 
+                {/* Invalidation Level */}
+                {td.invalidationLevel && (
+                  <div className="py-1.5 border-t border-border/30">
+                    <div className="flex items-center justify-between text-[10px]">
+                      <div className="flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full bg-destructive animate-pulse" />
+                        <span className="text-foreground font-bold">
+                          {isBullTrend ? '⚠ Invalidation (HL)' : '⚠ Invalidation (LH)'}
+                        </span>
+                      </div>
+                      <span className="font-bold tabular-nums text-destructive">${fmt(td.invalidationLevel)}</span>
+                    </div>
+                    {td.invalidationDescription && (
+                      <div className="text-[9px] text-muted-foreground mt-0.5 ml-3.5">
+                        {td.invalidationDescription}
+                      </div>
+                    )}
+                    <div className="text-[9px] text-muted-foreground mt-0.5 ml-3.5 tabular-nums">
+                      {(() => {
+                        const dist = ((asset.price - td.invalidationLevel) / asset.price) * 100;
+                        return `${dist >= 0 ? '+' : ''}${dist.toFixed(2)}% from current price`;
+                      })()}
+                    </div>
+                  </div>
+                )}
+
                 {/* ATR Stop */}
                 <div className="flex items-center justify-between text-[10px] py-1 border-t border-border/30">
                   <span className="text-muted-foreground font-medium">ATR Trailing Stop (2x)</span>
